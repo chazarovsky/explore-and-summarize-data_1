@@ -1,0 +1,1134 @@
+---
+title: "Analysis of Users of the Ecobici Program in Mexico City"
+output: html_document
+---
+
+# 1. Introduction
+
+### What is Ecobici?
+Ecobici is a government sponsored program to encourage people to use bycicles as a means of transportation in Mexico City. Users of the program pay an annual fee to borrow a bike at any time for a maximum duration of 45 minutes. There are bike stations in different parts of the city and one can take a bike on any station and return it at any other.
+
+### Why analyze Ecobici?
+While the program has enjoyed good general reception since it was launched in 2010, there is still a lot that can be done to further increase its adoption. In order to create a successful expansion plan, one must gather knowledge about the factors that seem to influence adoption, though. One way to do that is by understanding the current state of adoption faceted by different traits, such as gender, age, location, etc.
+
+For this project, we'll attempt to answer the following questions:
+
+1. Who uses Ecobici more: men or women?
+2. Does age play a role in the adoption of Ecobici?
+3. Who are the most devoted users of Ecobici by region?
+4. What is the rate of adoption of the program throughout the years?
+5. What's the relationship between age and the number of rides a person takes?
+6. What's the relationship between tenure (i.e. the time a person has been enrolled in the program) and the number of rides a person takes?
+7. How active are users of Ecobici in terms of rides per week?
+
+Surely other questions will pop up as we do the analysis, and we'll try to answer those as well.
+
+# 2. The Dataset
+The dataset we'll be analyzing in this project is that of users of the Ecobici program who signed up between February 15, 2010 and December 31, 2013. This and other datasets related to Ecobici can be downloaded from Mexico City's Data Labs [official website](http://datos.labplc.mx/datasets/view/ecobici_usuarios).
+
+The columns of the dataset include:
+
+1. User ID
+2. Card ID
+3. Gender
+4. Date of birth
+5. Borough (where the user lives)
+6. Municipality (where the user lives)
+7. State (where the user lives)
+8. Type of registration (web, offline, telmex)
+9. Date of registration
+10. Rides count
+11. Status (active vs inactive)
+
+(Later on when we prepare the dataset, you'll notice that, in the ```registration.type``` variable, there's one value called "ALTA TELMEX". Telmex is the largest phone company in Mexico, and has partnered with Mexico City's government to allow payment of the annual fee for Ecobici through a user's phone bill.)
+
+We'll also explore some variables that are not included in the previous list, but which can be easily derived from the original dataset:
+
+1. Age
+2. Tenure (number of days since the user registered in the program)
+
+---------------
+
+### Dataset Preparation
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(
+    fig.width = 16, fig.height = 10, fig.path = 'Figs/',
+    warning = FALSE, message = FALSE, echo = FALSE,
+    strip.white = TRUE, cache = TRUE, autodep = TRUE)
+```
+
+```{r}
+ensure_package <- function(name) {
+   if (!require(name, character.only = T)) {
+      install.packages(name);
+   }
+   require(name, character.only = T);
+}
+```
+
+Before we begin, we'll go through a couple of steps to put the dataset in a more suitable form for analysis.
+
+We'll read in the data from the ```ecobici_usuarios.csv``` file, specifying that we don't want to read strings as factors. This is because we don't want dates to be turned into factors. We also want to strip whitespace so as to avoid additional spurious factor levels later on.
+```{r}
+
+Sys.setlocale("LC_CTYPE", "spanish")
+
+# Set your cdw to the source file location
+users <- read.csv('ecobici_usuarios.csv',
+                  header = T, stringsAsFactors = F, strip.white = T, encoding = "UTF-8")
+```
+
+Our dataset contains ```r nrow(users)``` entries of ```r ncol(users)``` variables,
+and by running the ```str``` command, we can see that all columns are named in Spanish:
+```{r}
+str(users)
+```
+
+So we'll translate them to English to make it easier for everyone to understand what each variable stands for:
+```{r}
+names(users) <- c(
+    "user.id", "card.id", "gender", "birthday", "borough", "municipality",
+    "state","registration.type", "registration.date", "rides.count", "status")
+names(users)
+```
+
+Some of our categorical variables (```registration.type```, ```status```) also have names in Spanish, or are not totally clear (```gender```). We'll translate those as well.
+```{r}
+head(users$registration.type)
+head(users$status)
+head(users$gender)
+```
+
+```{r}
+# If regexps are Greek to you, check out this guide:
+# http://www.regular-expressions.info/rlanguage.html
+#
+# You can also check ?regex for built-in help in RStudio
+whitespace_to_na <- function(str) gsub("^[[:space:]]*$", NA, str)
+
+# Convert blank entries to NA, but only for char columns
+char_cols <- sapply(users, is.character)
+users[char_cols] <- lapply(users[char_cols], whitespace_to_na)
+users[char_cols] <- lapply(users[char_cols], tolower)
+
+users <- na.omit(users)
+
+# Parse date columns (dates are in the year-month-day format, hence ymd)
+ensure_package("lubridate")
+
+date_cols <- c("birthday", "registration.date")
+users[date_cols] <- lapply(users[date_cols], ymd)
+
+# Convert all other columns to factors
+cols <- !names(users) %in%
+    c("rides.count", "user.id", "birthday", "registration.date")
+users[cols] <- lapply(users[cols], factor)
+
+# Once a column is a factor, renaming their values is trivial using levels(...)
+levels(users$registration.type) = c("normal", "telmex", "web")
+levels(users$status) = c("inactive", "active")
+levels(users$gender) = c("female", "male")
+```
+
+After a little bit of cleaning and parsing (see the accompanying Rmd file for details), we get the following structure:
+```{r}
+str(users)
+```
+
+And the values for our categorical values are now clearer:
+```{r}
+head(users[, c("registration.type", "status", "gender")])
+```
+
+Now we'll extract some extra variables. We'll begin with tenure (the number of days since the user registered):
+```{r}
+reference_day <- ymd("2013-12-31")
+users$tenure <- with(users, as.period(
+    new_interval(registration.date, reference_day), units = "days")$day)
+str(subset(users, select = c(tenure)))
+```
+
+Then we'll add age:
+```{r}
+users$age <-
+    with(users, as.period(reference_day - birthday, units = "years")$year)
+str(subset(users, select = c(age)))
+```
+
+As it is usual with datasets in the real world, there's some bad data that we need to filter out. For our dataset, it turns out that there are 26 people who were born in the future or were riding an adult bike at age 3 or less!
+```{r}
+dim(subset(users, age <= 3))
+```
+
+So, let's remove those and get ready for our exploratory data analysis. Let's get started!
+```{r}
+# Filter out users who claim to have been born today or in the future
+users <- subset(users, age >= 4)
+```
+
+# 3. Exploration
+```{r}
+# COMMON FUNCTIONS
+# Throughout the analysis we'll be using a couple of functions to reduce the amount of coding we need to do in order to
+# create some plots.
+
+ensure_package("gridExtra")
+ensure_package("ggplot2")
+ensure_package("lazyeval")
+ensure_package("dplyr")
+ensure_package("tidyr")
+
+median_color <- "orange"
+mean_color <- "red"
+q1_color <- "darkolivegreen4"
+q3_color <- "goldenrod4"
+
+# Unlike the functions of the ggplot package that accept symbols as variable
+# names, all of the following functions take strings as variable names
+make_histogram <- function(data, var, binwidth = NA, drop = F) {
+    ggplot(aes_string(x = var), data = data, environment = environment()) +
+        make_histogram_layer(binwidth = binwidth, drop = drop)
+}
+
+make_histogram_by <-
+    function(data, var, facet, binwidth = NA, drop = F, position = "stack") {
+    ggplot(aes_string(x = var, fill = facet), data = data, environment = environment()) +
+        make_histogram_layer(binwidth = binwidth, drop = drop,
+                             position = position)
+}
+
+make_decorated_histogram <- function(data, var, binwidth = NA) {
+    stats <- make_stats_summary(data, var)
+    data %>%
+        make_histogram(var, binwidth = binwidth) %>%
+        decorate_with_stats(stats)
+}
+
+make_decorated_histogram_by <-
+    function(data, var, facet, binwidth = NA, scales = "fixed") {
+        stats <- make_stats_summary_by(data, var, facet)
+        data %>%
+            make_histogram(var, binwidth = binwidth) %>%
+            decorate_with_stats(stats) +
+            facet_wrap(interp(~x, x = as.name(facet)), ncol = 1, scales = scales)
+}
+
+make_ordered_histogram <- function(data, var, limit = 10, decreasing = F) {
+    top <- head(sort(table(data[,var]), decreasing = decreasing), limit)
+    top <- as.data.frame(top)
+
+    top[,var] <- rownames(top)
+    names(top) <- c("count", "name")
+    rownames(top) <- 1:nrow(top)
+    # change the levels to the sorted names so ggplot will plot them in sorted
+    # order
+    top$name <- factor(top$name, levels = top$name)
+
+    ggplot(aes(x = name, y = count), data = top) +
+        geom_bar(stat = 'identity') +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+}
+
+# This method is designed for categorical values that may have too many values
+# to be comfortably displayed on the screen, so that they require some trimming
+# after a certain limit
+make_ordered_histogram_by <-
+    function(data, var, facet, limit = 10, relative = F) {
+    # TODO: figure out how to include a parameter that controls sorting direction
+    grouped_data <- users %>%
+        group_by_(facet, var) %>%
+        summarise(count = n()) %>%
+        arrange(desc(count)) %>%
+        ungroup()
+
+    # remove the tbl_df wrapper that the dplyr functions add so that
+    # grouped_data[,var] returns a vector
+    grouped_data <- as.data.frame(grouped_data)
+
+    # this ensures that the plot will preserve the data in the right order
+    grouped_data[,var] <-
+        factor(grouped_data[,var], levels = unique(grouped_data[,var]))
+    facet_levels <- levels(grouped_data[,facet])
+
+    # switch to wide format so we can get the top N * LIMIT rows in the dataset,
+    # where N is the number of levels in the facet variable
+    grouped_data <- grouped_data %>%
+        spread_(facet, "count") %>%
+        head(limit) %>%
+        gather_(facet, "count", facet_levels)
+
+    position <- ifelse(relative, "fill", "stack")
+    ggplot(aes_string(x = var, y = "count", fill = facet), data = grouped_data) +
+        geom_histogram(stat = 'identity', position = position) +
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+}
+
+default_x_scale <- function(var, step = 10) {
+    scale_x_continuous(breaks = seq(min(var), max(var), step))
+}
+
+default_y_scale <- function(var, step = 10) {
+    scale_y_continuous(breaks = seq(min(var), max(var), step))
+}
+
+# TODO: Create a more general function that works for any facet
+decorated_boxplot_by_gender <- function(data, var, male_threshold, female_threshold) {
+    ggplot(aes_string(x = "gender", y = var), data = data,
+           environment = environment()) +
+    geom_boxplot() +
+    geom_hline(aes(yintercept = male_threshold, colour = "Men"),
+               linetype = "longdash", show_guide = T) +
+    geom_hline(aes(yintercept = female_threshold, colour = "Women"),
+               linetype = "longdash", show_guide = T) +
+    scale_colour_manual(name = "Outliers Threshold",
+        values = c("Men" = "dodgerblue2", "Women" = "deeppink3")) +
+    guides(colour = guide_legend())
+}
+
+make_histogram_layer <- function(binwidth, drop = F, position = "stack") {
+    layer <- geom_histogram()
+    if (!is.na(binwidth)) {
+        layer <- geom_histogram(binwidth = binwidth,
+                                drop = drop,
+                                position = position)
+    } else {
+        layer <- geom_histogram(drop = drop,
+                                position = position)
+    }
+    layer
+}
+
+median_line <- function(stats)
+    geom_vline(aes(xintercept = median, color = "Median"), stats,
+               show_guide = T, linetype = "longdash", size = 1)
+
+mean_line <- function(stats)
+    geom_vline(aes(xintercept = mean, color = "Mean"), stats,
+               show_guide = T, linetype = "longdash", size = 1)
+
+q1_line <- function(stats)
+    geom_vline(aes(xintercept = q1, color = "1st Quartile"), stats,
+               show_guide = T, linetype = "longdash", size = 1)
+
+q3_line <- function(stats)
+    geom_vline(aes(xintercept = q3, color = "3rd Quartile"), stats,
+               show_guide = T, linetype = "longdash", size = 1)
+
+generate_stats_summary_exprs <- function(var) {
+    # see the comment in "make_stats_summary" for details on this somewhat
+    # complicated function
+    var <- as.name(var)
+    exprs <- list(interp(~as.numeric(quantile(x, 0.25)), x = var),
+                  interp(~median(x), x = var),
+                  interp(~mean(x), x = var),
+                  interp(~as.numeric(quantile(x, 0.75)), x = var))
+
+    list(vars = c("q1", "median", "mean", "q3"), exprs = exprs)
+}
+
+make_stats_summary <- function(data, var) {
+    # Unfortunately, "summarise_" doesn't support string literals directly
+    # The workaround is to generate expressions from strings.
+    #
+    # For details, see:
+    # http://cran.r-project.org/web/packages/dplyr/vignettes/nse.html
+    with(generate_stats_summary_exprs(var),
+         summarise_(data, .dots = setNames(exprs, vars)))
+}
+
+make_stats_summary_by <- function(data, var, facet) {
+    grouped_data <- group_by_(data, facet)
+
+    # See the comment in "make_stats_summary"
+    with(generate_stats_summary_exprs(var),
+         summarise_(grouped_data, .dots = setNames(exprs, vars)))
+}
+
+manual_stats_scale <- function() {
+    scale_colour_manual(
+        name = "Statistics",
+        values = c("1st Quartile" = q1_color, "Median" = median_color,
+                   "Mean" = mean_color, "3rd Quartile" = q3_color))
+}
+
+decorate_with_stats <- function(plot, stats) {
+    plot +
+        q1_line(stats) +
+        q3_line(stats) +
+        median_line(stats) +
+        mean_line(stats) +
+        manual_stats_scale() +
+        guides(color = guide_legend())
+}
+
+bucket <- function(x, bucket_size) {
+    round(x / bucket_size) * bucket_size
+}
+```
+
+### Bird's-eye view of the dataset
+To get a bird's-eye overview of our dataset, let's create a scatterplot matrix:
+```{r}
+ensure_package("GGally")
+
+users.reduced <- subset(users, status == 'active', 
+                        select = -c(user.id, card.id, state, borough, municipality, registration.date, birthday))
+
+set.seed(20022012)
+users_sample <- users.reduced[sample(1:nrow(users.reduced), 10000), ]
+ggpairs(users_sample, params = c(shape = I('.'), outlier.shape = I('.')))
+```
+
+Some of the resulting plots are very easy to interpret (e.g. histograms of categorical variables), while others, such as the histogram and density plots of ```rides.count``` require further investigation to understand completly. In the following sections, we'll try to understand such plots better.
+
+---------------
+
+### Univariate Analysis and Plots
+Let's begin by taking a look at summary of the variables of interest, one by one in order to avoid the crammed output that doing ```summary(users)``` would give us:
+
+*Age*
+```{r}
+summary(users$age)
+```
+
+*Tenure*
+```{r}
+summary(users$tenure)
+```
+
+*Number of rides*
+```{r}
+summary(users$rides.count)
+```
+
+*Gender*
+```{r}
+summary(users$gender)
+```
+
+*Status*
+```{r}
+summary(users$status)
+```
+
+*State, Municipality and Borough*
+```{r}
+summary(subset(users, select = c(state, municipality, borough)))
+```
+
+*Type of Registration*
+```{r}
+summary(users$registration.type)
+```
+
+*Birthday and Date of Registration*
+```{r}
+summary(subset(users, select = c(birthday, registration.date)))
+```
+
+Some facts we can see right away include:
+
++ The number of registered female users (```r nrow(subset(users, gender == 'female'))```) versus male users (```r nrow(subset(users, gender == 'male'))```)
+
++ The oldest birthday (```r format(min(users$birthday), format="%B %d %Y")```)
+
++ The states with most users: D.F. (Federal District) with ```r nrow(subset(users, state == 'd.f.'))``` users, followed by Edo. Mex. (State of Mexico) with ```r nrow(subset(users, state == 'edo. mex.'))``` users
+
++ The municipalities with most users: Cuauhtémoc with ```r nrow(subset(users, municipality == 'cuauhtémoc'))``` users and Miguel Hidalgo with ```r nrow(subset(users, municipality == 'miguel hidalgo'))``` users (which comes as no surprise, given that most bike stations are in those areas.)
+
++ The range of ages goes from ```r min(users$age)``` to ```r max(users$age)``` years old
+
++ The number of active users (```r nrow(subset(users, status == 'active'))```) vs the number of inactive users (```r nrow(subset(users, status == 'inactive'))```)
+
+We'll explore these facts and others in much more detail in the following sections.
+
+---------------
+
+#### Age
+One of the original questions posed at the beginning of this project was: *Does age play a role in the adoption of Ecobici?* The following histogram may give us some insight into the answer:
+
+```{r}
+make_histogram(users, "age", binwidth = 1)
+```
+
+A couple of things are immediately obvious:
+
++ There are no gaps in the range of ages,
++ The distribution is unimodal and skewed to the left,
++ The mode appears to be around 30, and
++ The outline of the histogram is kind of smooth (i.e. the function that relates adoption of the program and age of the users seems to be smooth.)
+
+The skewness of the distribution is most likely due to the fact that Ecobici requires a credit card or phone bill invoice for registration. Underage people can still register, but they need to get written approval from their parents.
+
+Let's add some more detail to the graph to investigate the mean and median, as well as the interquartile range (IQR):
+```{r}
+make_decorated_histogram(users, "age", binwidth = 1) +
+    default_x_scale(users$age, step = 5)
+```
+
+The median seems to be around 33, with the mean at around 35, a consequence of the longer right tail of the distribution. The mode, which represents the largest age group in the program, is right at 28 years old.
+
+---------------
+
+##### Age faceted by Gender
+Let's now compare the female and male populations in a frequency polygon plot:
+```{r}
+ggplot(aes(x = age), data = users) +
+    geom_freqpoly(aes(color = gender)) +
+    default_x_scale(users$age, step = 5)
+```
+
+It's clear that the distributions are somewhat similar in shape but men dominate in number. To see this more clearly, let's draw them in different plots in the same column, along with their mean, median and IQR:
+```{r}
+make_decorated_histogram_by(users, "age", "gender", binwidth = 1, scales = "free_y") +
+    default_x_scale(users$age, step = 2)
+```
+
+Now it's easier to see that the male population tends to be a bit older than the female population. Also, it seems like the variance of the male population is greater. Let's compute the standard deviation to confirm or deny this perception:
+```{r}
+by(users$age, users$gender, sd)
+```
+
+And, indeed, the male population has a greater variance.
+
+Finally, let's create a boxplot that includes the very first outliers to get another look at the same data:
+```{r}
+decorated_boxplot_by_gender(users, "age", 64, 58) +
+    coord_cartesian(ylim = c(26, 66)) +
+    scale_y_continuous(breaks = seq(26, 66, 2))
+```
+
+One additional piece of information that the boxplot gives us is the age at which men or women start being considered "rare" (the "outlier thresholds") in their respective populations. Notice that in the case of men, we see the first outliers after age 63, while in the case of women it is after age 57. This supports our hypothesis that the male population tends to be older.
+
+---------------
+
+##### Age faceted by Type of Registration
+Let's now explore the distribution partitioned by type of registration:
+```{r}
+make_histogram_by(users, "age", "registration.type", binwidth = 1,
+                  position = "dodge", drop = T) +
+    default_x_scale(users$age, step = 3) +
+    scale_y_log10(breaks = c(1, 5, 10, 50, 100, 500, 1000))
+```
+
+It's obvious from this plot how an overwhelming majority of users signup using the traditional means (as opposed to signing up on the web or using Telmex), but also how the "web" population dominates over the "telmex" population, albeit by a small margin (at least as compared to how the "normal" population dominates over the two.)
+
+Let's now compare the three populations on a free scale with a more elaborate histogram:
+```{r}
+make_decorated_histogram_by(users, "age", "registration.type", binwidth = 1,
+                            scales = "free_y") +
+    default_x_scale(users$age, step = 5)
+```
+
+Clearly, the Telmex population seems to be much younger, though it's unclear why this might be. One possible explanation is that younger people are less likely to have a credit card, so they may be using their phone bill (or their parents') to join the program.
+
+Running a summary by type of registration, we confirm that the Telmex population does tend to be younger:
+```{r}
+by(users$age, users$registration.type, summary)
+```
+
+It also seems that the Telmex population has greater variance. Computing the standard deviation we can see whether this is true:
+```{r}
+by(users$age, users$registration.type, sd)
+```
+
+---------------
+
+##### Age faceted by Type of Registration and Gender
+Finally, let's make a plot where we can see the distribution of age by gender and type of registration to see whether women or men have a preference in the way they sign up to the program:
+```{r}
+make_histogram_by(users, "age", "gender", binwidth = 1, position = "dodge") +
+   facet_wrap(~registration.type, ncol = 1, scales = "free_y")
+```
+
+There appears to be no significant difference in the distributions of men and women in either the normal or web populations, but it could be argued that there's something going on in the case of Telmex where the variations in the distributions of men and women are less in sync than in the other populations. This is an intriguing finding, but we have no further data to make a hypothesis about it.
+
+---------------
+
+#### Rides Count
+Let's now proceed to analyze the number of rides for users:
+```{r}
+summary(users$rides.count)
+make_histogram(users, "rides.count", binwidth = 10)
+```
+
+We seem to have a heavily skewed distribution, with a very thin and long tail, from which we can deduce that there's a bunch of users each with a large number of rides. We can also see this if we tally the frequency of the number of rides and see it in reverse order:
+```{r}
+distribution <- table(users$rides.count)
+tail(distribution, 20)
+```
+
+To get a better visualization, we'll apply a scale transformation on the x axis:
+```{r}
+make_histogram(users, "rides.count") +
+   scale_x_log10(breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000))
+```
+
+There's an important and very evident finding here: a rather large number of people signed up for the program, used it a couple of times and then stopped using it. Let's see the exact numbers:
+```{r}
+head(distribution, 10)
+```
+
+There is a very large number of people with no rides. Could this be bad data or is it true that almost ```r ceiling(100 * (nrow(subset(users, rides.count == 0)) / nrow(users)))```% of the users signed up for the program but then never actually used it at all?
+
+Let's add more information to the previous plot:
+```{r}
+make_decorated_histogram(users, "rides.count") +
+    scale_x_log10(
+        breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000))
+```
+
+The median number of rides appears to be 6. Let's confirm the numbers analytically:
+```{r}
+summary(users$rides.count)
+```
+
+This has really caught our attention. Let's see what proportion of the total number of users have done less than the median number of rides:
+```{r}
+m <- with(users, median(rides.count))
+nrow(subset(users, rides.count <= m)) / nrow(users)
+```
+
+This number is quite surprising, around 51% of users are people who have just tried the program a couple of times! Certainly not what we might call "active users". This is an important finding.
+
+Now, let's analyze whether this phenomenon appears regardless of gender:
+```{r}
+make_decorated_histogram_by(users, "rides.count", "gender") +
+   scale_x_log10(breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000))
+```
+
+In the case of women, the phenomenon seems to be much worse with a median of 3 rides, which we can confirm analytically:
+```{r}
+by(users$rides.count, users$gender, summary)
+by(users$rides.count, users$gender, IQR)
+```
+
+These last numbers show something surprising: women have a median of ```r with(subset(users, gender == 'female'), median(rides.count))``` rides, while men have a median of ```r with(subset(users, gender == 'male'), median(rides.count))``` rides. The means are higher because of outliers in both groups that drag them up to ```r with(subset(users, gender == 'male'), mean(rides.count))``` in the case of men, and ```r with(subset(users, gender == 'female'), mean(rides.count))``` in the case of women.
+
+Let's the see the proportion of women (relative only to the female population) who have taken a number of rides equal to or less than the median:
+```{r}
+women <- subset(users, gender == 'female')
+m <- with(women, median(rides.count))
+nrow(subset(women, rides.count <= m)) / nrow(women)
+```
+
+Despite the lower median, the proportion of "active users" (informally defined here as those who have taken more than the median number of trips in their population) for women is actually quite close to that of the general population.
+
+However, if we just concentrate on the values below the median, and we look at the proportions, rather than the full counts, it's immediately obvious that the phenomenon is a bit more pronounced in the case of women:
+```{r}
+ggplot(aes(x = rides.count, fill = gender), data = users) +
+    geom_histogram(aes(y = ..density..), position = "fill") +
+    scale_x_log10(breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000)) +
+    geom_hline(aes(yintercept = 0.5), linetype = "longdash")
+```
+
+From this last plot, there's no doubt that the most devoted "active" users of Ecobici are men (people with over a 1000 rides.) Also interesting is that despite the downward trend after about 25 rides for women, they make an important comeback when getting near 1000 with a proportion of around 0.30
+
+Finally, let's see what additional information about outliers we can glean from a boxplot:
+```{r}
+decorated_boxplot_by_gender(users, "rides.count", 66, 121) +
+    coord_cartesian(ylim = c(1, 125)) +
+    scale_y_continuous(breaks = seq(0, 125, 5))
+```
+
+Well, it seems that women with over a 150 rides are quite rare as far as their population goes, while men need to surpass the 300 rides to be considered rare.
+
+---------------
+
+#### Tenure
+We'll now take a look at tenure, the number of days a user has been in the program:
+```{r}
+with(users, summary(tenure))
+
+make_histogram(users, "tenure") +
+    default_x_scale(users$tenure, step = 100)
+```
+
+The distribution shown by the previous plot tells us at least three things:
+
+1. Most people using Ecobici joined relatively recently (within the last year and a half or so).
+
+2. The second biggest group of users seems to correspond to the early adopters back in 2010 when Ecobici was first launched.
+
+3. Something happened after the second year of operation that caused a diminished number of new users. Maybe there was just not enough advertising or only a limited number of bike stations was available, thus limiting the number of potential users. However, that clearly changed during the third year of its operation.
+
+Let's change the binwidth of the histogram to 1 to see if we notice anything unusual:
+```{r}
+make_histogram(users, "tenure", binwidth = 1) +
+    default_x_scale(users$tenure, step = 100)
+```
+
+The overall shape of the distribution seems the same, but we do see two or three very distinct points with well over 400 counts. We're not sure what these might represent, but they don't seem to warrant much attention.
+
+Another comparison we can make is whether the Federal District and the State of Mexico have the same tenure distributions. Let's find out:
+```{r}
+make_decorated_histogram_by(subset(users, state == 'd.f.' | state == 'edo. mex.'),
+    "tenure", "state", binwidth = 10, scales = "free_y") +
+    default_x_scale(users$tenure, step = 100)
+```
+
+The overall shapes of the distributions are quite similar, but the State of Mexico does have a lower median and mean, and generally lower amounts of people with tenures between 300 and 500 days. This means that for some reason after its first year of operation, the number of new Ecobici users coming from the State of Mexico declined much more rapidly than its counterpart in the Federal District.
+
+Finally, let's see whether faceting by gender shows anything interesting:
+```{r}
+ggplot(aes(x = tenure), data = users) +
+   geom_freqpoly(aes(color = gender)) +
+   default_x_scale(users$tenure, step = 100)
+```
+
+The distributions are really similar in shape, so the answer appears to be no.
+
+---------------
+
+#### Location (State, Municipality and Borough)
+Our dataset contains three variables related to location. We're interested in seeing which locations have the most users. For the case of states there's really no point in plotting in detail, as the Federal District and the State of Mexico dwarf all other states, as can be seen in the following plots:
+```{r}
+make_histogram(users, "state") +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_y_log10(breaks = c(1, 10, 100, 1000, 10000))
+```
+
+In the case of municipalities, we'll focus on those in the Federal District:
+```{r}
+ensure_package("scales")
+df_users <- subset(users, state == 'd.f.')
+df_users$municipality <- factor(df_users$municipality)
+make_histogram_by(df_users, "municipality", "gender", drop = T, position = "dodge") +
+    theme(axis.text.x = element_text(angle = 90, size = 9)) +
+    scale_y_continuous(
+        trans = "log1p", expand = c(0,0),
+        breaks = c(1, 5, 10, 20, 50, 100, 500, 1000, 5000))
+```
+
+For someone who lives in the Federal District, it's obvious that there's more municipalities in this graph than there should be. The Federal District is divided into 16 regions (known in Spanish as *Delegaciones*), and this graph shows way more regions. Taking a cursory look at the regions displayed, it appears that some of them are part of the State of Mexico. Unfortunately, there's many of them obscuring those that we care about.
+
+So it seems like we've hit a dead-end here, as a proper analysis of users by state and municipality requires the data to be correct. One thing we could do is to ensure consistency between municipalities and states, but doing so requires an official listing of municipalities per state (a "golden standard"), as well as applying some fuzzy matching techniques to ensure all municipalities have a single unique name (as it stands right now, it's quite possible that the same municipality name was input using just slightly different names, due to spelling errors, data corruption, lack of accents, etc.)
+
+Nevertheless, it's likely that, even if states and municipalities are not matched up correctly in many cases, the rest of the data is fine (i.e. people did write correctly their municipality and borough of residence), so we can still plot a histogram including the municipalities and boroughs with most registered users.
+
+We'll do just that by sorting the regions and making them an ordered factor before we plot (you can see the details in the [Common Functions](#common-functions) section above):
+
+```{r}
+make_ordered_histogram(users, "municipality", limit = 15, decreasing = T)
+```
+
+Clearly, the distribution is really far from uniform, with just two or three municipalities leading the charts.
+
+Let's do the same plot for boroughs now:
+```{r}
+make_ordered_histogram(users, "borough", limit = 15, decreasing = T)
+```
+
+We can also see if there are places, amongst those with most users, where the proportion between men and women deviates significantly from that of the general population:
+```{r}
+make_ordered_histogram_by(users, "municipality", "gender", limit = 15, relative = T) +
+    geom_hline(aes(yintercept = 0.5), linetype = "longdash") +
+    geom_hline(aes(yintercept = 0.35), linetype = "longdash") +
+    scale_y_continuous(breaks = seq(0, 1, 0.1))
+```
+
+In general, men seem to be majority, but never exceeding 65%. Let's see whether we can find a place where this exceeds that by including more boroughs in our plot:
+```{r}
+make_ordered_histogram_by(users, "borough", "gender", limit = 50, relative = T) +
+    geom_hline(aes(yintercept = 0.5), linetype = "longdash") +
+    geom_hline(aes(yintercept = 0.31), linetype = "longdash") +
+    scale_y_continuous(breaks = seq(0, 1, 0.1))
+```
+
+Here we notice for the first time a significant variation: the borough "Centro (Area 1)" (part of Downtown Mexico City) does have a proportion of men close to 69%, the biggest thus far. This is somewhat surprising, as intuitively one would expect that region to have a more balanced proportion.
+
+---------------
+
+### Bivariate Analysis and Plots
+Having become acquainted with the individual variables of the dataset, we'll now proceed to look at the relationships between continuous variables in it.
+
+For some of the plots involving the whole dataset, as opposed to summaries, we'll be using a sample of 30,000 rows to the make our plotting faster.
+
+```{r}
+set.seed(7670767)
+users_sample <- users[sample(1:nrow(users), 40000), ]
+```
+
+#### Age vs Tenure
+We'll begin by looking at the relationship between age and tenure. We wonder who tends to stick to the program longer, young people or older people:
+```{r}
+ensure_package("RColorBrewer")
+
+ggplot(aes(x = age, y = tenure), data = users_sample) +
+    geom_point(aes(color = gender)) +
+    default_x_scale(users_sample$age, step = 5) +
+    scale_color_brewer(palette = "Set1")
+```
+
+Well, other than showing the grouping of people in three large clusters of tenure, the graph doesn't really tell us much more. Let's add a bit of jitter and some alpha to the points to see if we uncover anything about the distribution of points:
+
+```{r}
+ggplot(aes(x = age, y = tenure), data = users_sample) +
+    geom_point(aes(color = gender), alpha = 1/5, position = 'jitter') +
+    default_x_scale(users_sample$age, step = 5) +
+    scale_color_brewer(palette = "Set1")
+```
+
+That's just slightly better, but it doesn't give us new information, all we see is things that we knew from the univariate analysis already (e.g. most of the population is young and middle age adults.)
+
+There's just too much data on the plot, so let's try using a summary instead. We'll add both the median and mean to the graph so we can compare, but we'll use the median as a more representative measure of the population as a whole because it's a more robust statistic in the presence of outliers:
+```{r}
+ggplot(aes(x = age, y = tenure), data = users) +
+    geom_line(stat = 'summary', fun.y = median, aes(colour = "Median")) +
+    geom_line(stat = 'summary', fun.y = mean, aes(colour = "Mean")) +
+    default_x_scale(users_sample$age, step = 5) +
+    scale_colour_manual(
+        name = "Statistics",
+        values = c("Median" = median_color, "Mean" = mean_color)) +
+    guides(colour = guide_legend())
+```
+
+Now, this is much better. We can see a trend more clearly. Let's add a smoother to make it even more obvious:
+```{r}
+users_summary <- users %>%
+    group_by(age, gender) %>%
+    summarise(tenure.mean = mean(tenure),
+              tenure.median = median(tenure)) %>%
+    ungroup()
+
+plot_with_regression <- function(data, x, y, colour) {
+    ggplot(aes_string(x = x, y = y), data = users_summary, environment = environment()) +
+    geom_line(colour = colour) +
+    geom_smooth() +
+    default_x_scale(users[,x], step = 5)
+}
+
+p1 <- plot_with_regression(users, "age", "tenure.median", median_color)
+p2 <- plot_with_regression(users, "age", "tenure.mean", mean_color)
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+The story that this plot tells us is that the early adopters of Ecobici were seniors. The rest of the population came on board later on, thus having less tenure. Also, the bowl-shaped curve of the regression line tells us that there's been a wave of young adults (around 30 years old) adopting the program more recently.
+
+And now let's facet it by gender and registration kind to see any possible variations in the distributions of those subpopulations:
+```{r}
+users_summary <- users %>%
+    group_by(age, gender, registration.type) %>%
+    summarise(tenure.mean = mean(tenure),
+              tenure.median = median(tenure)) %>%
+    ungroup()
+
+ggplot(aes(x = age, y = tenure.median / 365), data = users_summary) +
+    geom_line(color = median_color) +
+    geom_smooth() +
+    default_x_scale(users$age, step = 5) +
+    facet_grid(gender ~ registration.type)
+```
+
+Now, this is a very interesting plot, because it tells very different stories for people who registered online versus those who did it using Telmex or in the traditional way. For example, for the web subgroup, it appears as though more elderly women starting at age 63 have continued to join the program after the first year of operation, in contrast to elderly males who have stopped joining in more recent years.
+
+However, it's very important to keep in mind the smaller relative sizes of the web and Telmex populations when trying to interpret the plot. The plot itself gives us a warning of this as the variances are rather large in each case, thus decreasing our confidence that the story it seems to tell can generalize well.
+
+---------------
+
+#### Age vs Rides Count
+Our next exploration will be getting at one of the initial questions: *does age play a role in the adoption and active use of Ecobici?*
+
+During our analysis of the distribution of the ```age``` variable, we partially answered this question. However, it's important to assess how age relates to the activity a user shows in the Ecobici program.
+
+Let's begin with a simple and straightforward scatterplot:
+```{r}
+ggplot(aes(x = age, y = rides.count), data = users_sample) +
+    geom_point() +
+    default_x_scale(users_sample$age, step = 5)
+```
+
+Let's try to see how the population is distributed by adding an alpha parameter:
+```{r}
+ggplot(aes(x = age, y = rides.count), data = users_sample) +
+    geom_point(alpha = 1/10, position = position_jitter()) +
+    default_y_scale(users_sample$rides.count, step = 100) +
+    default_x_scale(users_sample$age, step = 5)
+```
+
+The bulk of the data seems to be below 300 rides, so in order to get a better view, let's scale the vertical axis, change the plotting color to something light, and add two-dimensional contour lines to see where most points concentrate:
+```{r}
+ggplot(aes(x = age, y = rides.count), data = users) +
+    geom_point(alpha = 1/10, position = position_jitter(), color = 'mistyrose3') +
+    stat_density2d(colour = 'black', size = 0.5, linetype = 2) +
+    scale_y_log10(breaks = c(1, 2, 3, 5, 10, 50, 100, 200, 500, 1000)) +
+    default_x_scale(users$age, step = 3) +
+    scale_color_brewer(palette = "Blues")
+```
+
+Now we can see what we discovered in the univariate analysis regarding the large number of users with just a few or zero rides. We can also see how the maximum number of points concentrates at around age 28 with a number of rides that varies between 10 and 100.
+
+It would be nice if we could incorporate information about tenure in this same plot. One way to do it is to divide tenure into a discrete number of intervals and color code the points according to that.
+
+Let's begin by creating a new variable ```tenure_in_semesters```:
+```{r}
+users$tenure_in_semesters <- factor(bucket(users$tenure, 180) / 180)
+```
+
+And we'll also facet by gender to include even more information in the plot
+```{r}
+ggplot(aes(x = age, y = rides.count), data = users) +
+    geom_point(aes(color = tenure_in_semesters), position = position_jitter()) +
+    default_x_scale(users$age, step = 3) +
+    stat_density2d(colour = 'black', size = 0.65, linetype = 2) +
+    scale_y_log10(breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500)) +
+    facet_wrap(~gender) +
+    scale_color_brewer(palette = "Blues")
+```
+
+Now we have even more information in one plot: we can easily see that most of the users with zero rides also have large tenures, which is interesting but still hard to understand. Was there a massive signup of users in the beginning of the program as part of a large media event, maybe?
+
+A couple of other things are revealed by this plot:
+
++ New users tend to have few rides in their history, as expected
++ A majority of users joined the program in the last one or two years
++ Teenagers and other young people have joined the program very recently
++ Users who joined the program recently *appear* to be more active than those who joined earlier. We cannot tell for sure whether this is true with just this information, but there's an easy way to confirm or deny this, as we'll see in a moment.
+
+If we really want to understand how active users are, we need to plot not the raw count of rides, but instead something that reveals their daily activity, such as the average number of rides per week that they've taken. Let's do that now:
+```{r}
+ggplot(aes(x = age, y = (rides.count / tenure) * 7), data = users) +
+    geom_point(aes(color = tenure_in_semesters), position = position_jitter()) +
+    default_x_scale(users$age, step = 3) +
+    stat_density2d(colour = 'goldenrod1', size = 1.2, linetype = 1) +
+    scale_y_log10(breaks = c(1, 2, 3, 5, 10, 20, 30)) +
+    facet_wrap(~gender) +
+    scale_color_brewer(palette = "Blues")
+```
+
+With this last plot, we can confirm that users who joined in the last year or two tend to be more active on average than those who joined earlier.
+
+---------------
+
+We've discovered quite a lot of things so far using scatterplots. Let's now turn our attention to creating plots that use summary statistics on the number of rides per age group rather than the raw counts:
+```{r}
+age_vs_rides_plot <- 
+    ggplot(aes(x = bucket(age, 3), y = rides.count), data = users) + 
+    geom_line(stat = 'summary', fun.y = median, aes(colour = "Median")) +
+    geom_line(stat = 'summary', fun.y = mean, aes(colour = "Mean")) +
+    geom_line(stat = 'summary', fun.y = quantile, probs = 0.75,
+              linetype = "longdash", alpha = 0.75, aes(colour = "3rd Quartile")) +
+    geom_line(stat = 'summary', fun.y = quantile, probs = 0.25,
+              linetype = "longdash", alpha = 0.75, aes(colour = "1st Quartile")) +
+    default_x_scale(users$rides.count, step = 5) +
+    manual_stats_scale() +
+    guides(color = guide_legend())
+
+age_vs_rides_plot
+```
+
+Here there's a clear trend: young people between the ages of 15 and 25 are the ones who take the most rides, and there's a steady decline in the number of rides as people get older. There are, of couse, outliers that drag the mean upwards, but we care only about the typical user for the most part.
+
+As we've done before, we'll check what the distributions look like for different segments of our population, but the same caveats mentioned in the last section apply here regarding the remarkable differences in the distributions for Telmex and web registration types:
+```{r}
+age_vs_rides_plot +
+    facet_grid(gender ~ registration.type, scales = "free_y")
+```
+
+One thing worth noticing, though, is the difference in the distributions between men and women in the normal subpopulation. Notice how the trends seem to reverse betwen the ages of 70 and 80, going down in the case men and going up significantly in the case of women. Could this be due to the presence of outliers in a relatively small group? Let's keep in the mind that the number of people in that age range is just ```r 100 * (nrow(subset(users, age >= 70)) / nrow(users)) ```% of the total.
+
+---------------
+
+# 4. Final Plots and Summary
+Our analysis of the Ecobici users has helped us answer all of the questions we had in mind before beginning our exploration, but it has also revealed some unexpected findings. In the following sections, we'll recapitulate the analysis done and present three plots that gave us important insights about the data.
+
+### Who uses Ecobici more: men or women?
+While it was clear from the beginning that men used Ecobici more than women, the extent to which this was true wasn't so clear. During the analysis, we found out that there was a downward trend in the proportion of women that completed an ever increasing number of rides, up to the point where men were the only ones to complete more than a thousand rides.
+
+```{r}
+ensure_package("scales")
+
+ggplot(aes(x = rides.count, fill = gender), data = users) +
+    geom_histogram(aes(y = ..density..), position = "fill") +
+    scale_x_log10(breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000)) +
+    geom_hline(aes(yintercept = 0.5), linetype = "longdash") +
+    scale_y_continuous(breaks = seq(0, 1, 0.1), labels = percent_format()) +
+    ggtitle('Rides Completed in Ecobici by Gender and Type of Registration') +
+    xlab('Rides completed') +
+    ylab('Participation') +
+    facet_wrap(~registration.type)
+```
+
+Also interesting in this plot is the fact that, if we divide the population by the type of signup process they used to enroll in the program, the distributions of each group do change substantially.
+
+We take this result with a grain of salt, however, given that the sizes of the Telmex and web groups are orders of magnitude smaller than that of the "normal" group, so it's likely that they will have much higher variance and may not faithfully reflect the true underlying distribution (assuming that there is indeed such an out-of-sample distribution which is substantially different from the "normal" distribution)
+
+In this plot there's also a hint of another phenomenon that we'll see more clearly in the following section, namely that there's a large proportion of people who signup for the program but end up taking just a few rides (or none at all.)
+
+Let's also take a look at the statistics on the number of rides by gender. Let's run the ```by``` command passing the ```summary``` and ```sd``` (standard deviation) functions to get these results.
+
+First the ```summary``` function:
+```{r}
+by(users$rides.count, users$gender, summary)
+```
+
+And then the ```sd``` function:
+```{r}
+by(users$rides.count, users$gender, sd)
+```
+
+Clearly, the number of rides completed by the median person is extremely low, especially in the case of women, and their lower standard deviation also shows a less diverse population. We'll see this result graphically in the following plot as well.
+
+One might be quick to think that this is surely the result of the relatively large number of newcomers to the program, but sadly an even worse result comes up when we filter out people who joined in the last six months (using 31 December, 2013 as the reference date):
+
+```{r}
+older_users <- subset(users, tenure > 180)
+by(older_users$rides.count, older_users$gender, summary)
+```
+
+This is a strong indication that, despite the large number of people who have joined, the program didn't really take off, and people just didn't use it quite as much as we might have expected.
+
+It's only the most enthusiastic of users that drag the mean upwards to about 25 rides in the case of women and to about 41 for men. This is especially true in the case of women where we can observe the third quartile being smaller than the mean.
+
+Another thing we might be interested in seeing, rather than just the raw counts, is the average number of rides people have taken per week during the time they've been in the program. This is not hard to compute, as we have the tenure available:
+
+```{r}
+users$rides_per_week <- (users$rides.count / users$tenure) * 7
+valid_users <- subset(users, !is.infinite(rides_per_week) & !is.nan(rides_per_week))
+
+by(valid_users$rides_per_week, valid_users$gender, summary)
+```
+
+The result shows that, viewed as a whole, men appear to use Ecobici twice as much per week as women, but again the average number of rides per week doesn't exceed two for either gender, which is sad news for the program, of course.
+
+### Active users of Ecobici
+The Ecobici dataset contains a field called ```status``` which tells us whether a given user is currently paying their annual fee, but that is obviously not enough to tell whether they actually use the program or not and to what extent.
+
+So, to find this out, we analyzed the number of rides people have taken against their age, the number of years they've been enrolled in the program, as well as their gender, in hopes of finding patterns:
+```{r}
+users$tenure_in_years <- factor(bucket(users$tenure, 365) / 365)
+
+ggplot(aes(x = age, y = rides.count), data = users) +
+    geom_point(aes(colour = tenure_in_years, weight = tenure_in_years),
+               position = position_jitter()) +
+    default_x_scale(users$age, step = 3) +
+    stat_density2d(colour = 'dimgrey', size = 0.65, linetype = 1) +
+    scale_y_log10(breaks = c(1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 300, 500)) +
+    facet_wrap(~gender) +
+    scale_color_brewer(palette = "Blues") +
+    xlab('Age (in years)') +
+    ylab('Number of rides') +
+    ggtitle('Ecobici Usage by Age, Gender and Time Since Enrollment') +
+    theme(legend.position = "top") +
+    labs(colour = "Number of Years in the Ecobici Program")
+```
+
+This plot reveals several interesting things:
+
++ Newcomers tend to have few rides in their history, as expected
+
++ The largest age groups in women seem to be confined to a more narrow range than those of men (notice how the two-dimensional density lines are more tightly packed and more to the left.) In other words, the female population tends to be younger than the male population in general, and their age range is narrower than that of men.
+
++ A majority of users joined the program in the last one or two years
+
++ Most teenagers and other young people have joined the program very recently
+
++ Users who joined the program recently *appear* to be more active than those who joined earlier. We confirmed this during our analysis by plotting not against the raw number of rides for each user, but rather against the average number of rides per week.
+
++ The horizontal stripes at the bottom of the plot shows that there is a large number of people who signed up for the program, took a few rides and then stopped using it. There are even people who didn't use the service at all. In this latter case, they appear to be mostly people who signed at the beginning of the program back in 2010 (notice the dark blue stripe at the bottom.)
+
+From the graph, it's not very clear whether there is a correlation between age and the number of rides a person takes, but we can run an analytical test to get this information:
+```{r}
+cor.test(users$age, users$rides.count)
+```
+
+The result is negative and quite small, so it's hard to make any conjectures. But this is understandable, after all there is quite a lot of variation in each age group (this is also quite evident from the shape of the plot.) So what if we took the average (and median) number of rides per age and then ran the test again. Let's find out for the average first:
+```{r}
+users_summary <- users %>%
+    group_by(age) %>%
+    summarise(rides.count.mean = mean(rides.count),
+              rides.count.median = median(rides.count))
+
+with(users_summary, cor.test(age, rides.count.mean))
+```
+
+And then for the median:
+```{r}
+with(users_summary, cor.test(age, rides.count.median))
+```
+
+This seems like a more significant result. There seems a strong negative correlation between age and number of rides, meaning that the older you are the less likely you are to take a ride in Ecobici (even if you did have good intentions and joined the program.) We saw this during our exploratory analysis too, but the numbers here confirm the result analytically. This result aligns well with our intuition about the relationship between the two variables.
+
+### Adoption Trends in Time by Age
+Finally, we'll present a plot of age versus the median number of years enrolled in the Ecobici program, faceted by gender and type of registration:
+
+```{r}
+users_summary <- users %>%
+    group_by(age, gender, registration.type) %>%
+    summarise(tenure.mean = mean(tenure),
+              tenure.median = median(tenure)) %>%
+    ungroup()
+
+ggplot(aes(x = age, y = tenure.median / 365), data = users_summary) +
+    geom_line(color = median_color) +
+    geom_smooth() +
+    default_x_scale(users$age, step = 5) +
+    facet_grid(gender ~ registration.type) +
+    xlab('Age (in years)') +
+    ylab('Median Number of Years Enrolled') +
+    ggtitle('Adoption Trends in Time by Age and Type of Registration')
+```
+
+This plot really tells us a lot of things! But we have to be careful in interpreting the results and keep in mind that the "web" and "telmex" populations are really small when compared to the "normal" population.
+
+The story that the plot for the "normal" population tells us is that the early adopters of Ecobici were seniors, and rest of the population came on board later on. Also, the bowl-shaped curve of the regression line tells us that there's been a wave of young adults (around 30 years old) adopting the program more recently.
+
+The previous remarks appear to be true in the case of the "web" population as well, but doesn't really hold in general for the "telmex" population. To try and confirm (or deny) our conjecture, we can run a correlation test between age and the median number of years enrolled in the program ("median tenure") for the whole population:
+
+```{r}
+users_summary <- users %>%
+    group_by(age, registration.type) %>%
+    summarise(tenure.median = median(tenure)) %>%
+    ungroup()
+
+with(users_summary, cor.test(age, tenure.median))
+```
+
+The result is positive but not very large, so even though age might play a role in determining tenure, it appears to be a small one in general.
+
+Let's see what happens if we segment by type of registration and run the same test for the "normal" population:
+```{r}
+with(subset(users_summary, registration.type == "normal"), cor.test(age, tenure.median))
+```
+
+For the "telmex" population:
+```{r}
+with(subset(users_summary, registration.type == "telmex"), cor.test(age, tenure.median))
+```
+
+And, finally, for the "web" population:
+```{r}
+with(subset(users_summary, registration.type == "web"), cor.test(age, tenure.median))
+```
+
+It's clear that faceting the population by type of registration does yield different insights about each subpopulation. For the "normal" and "telmex" population, the correlation coefficients are close enough that we can think of them as being more or less the same, but for the "web" population the correlation is much stronger and turns out to be an intriguing result because our intuition is that older people are less prone to use the internet (at least in Mexico.)
+
+To close this section, it's important to keep in mind that the differences in the relative sizes of the subpopulations make it hard to believe with confidence that the distributions depicted by the regression lines are indeed a faithful reflection of the underlying distributions, and future work should focus on getting much more data on these subpopulations to increase our confidence in the results.
+
+# 5. Reflection
+We started our exploration with some initial questions in mind, but we also knew we might end up exploring other things as we dug deeper into the relationships hidden in the data.
+
+The scatterplot matrix was a very useful tool to give us a very quick overview of what laid ahead, as it gave us some direction of what might be interesting to look at.
+
+Our analysis then began with an attempt to understand each variable in isolation: histograms, augmented with lines showing its mean, median and interquartile range, were of great help here. Boxplots gave use additional information about what was considered an outlier in each distribution.
+We also made use of faceted views and coloring to visualize single variables for different subgroups (e.g. males vs. females, people who signed up offline vs. on the web.)
+
+Our analysis then proceeded to consider the relationship between pairs of continuous variables, and we realized that sometimes a direct plot of a variable against another doesn't really provide much insight into the data. That's when we turned to using summary statistics. We tried using both the mean and the median, but we settled for the median when trying to make conjectures because our dataset contained too much variation and outliers, making the mean a poor choice to understand the typical member of a population.
+
+### Difficulties
+One of the initial difficulties we ran into during the analysis was related to the fact that the data wasn't completely tidy. We realized this as we were doing the visualizations and had to step back and clean it up a bit before proceeding. We tried to mitigate this to some degree with some simple cleaning steps, but we were aware that more work would be needed for a completely clean dataset.
+
+Another difficulty we had was interpreting some of the data correctly. Specifically, in the case of the subpopulations defined by the kind of registration, we were initially inclined to believe that the differences we saw in their distributions and statistical summaries might be an indication of a truly different kind of population. But, as progressed through the analysis, we came to realize that we should be very careful to jump to conclusions because those subpopulations were very small in size and therefore very prone to high variance.
+
+### Successes
+We were able to answer all of the initial questions we had in mind, and we were also lucky to make some important discoveries regarding the adoption of the Ecobici program that may be very valuable to improve the program.
+
+One of those discoveries is the unfortunate pattern that a considerable proportion of the people who sign up to the program end up using it just a couple of times, something that happened even more frequently in the case of women.
+
+Another discovery we made was that, despite getting stuck in its growth during its second year of operation, the program made a comeback in its third and fourth year that attracted a lot of young people who are very active in terms of rides per week.
+
+### Future Work
+One piece of future work that would be fantastic is to create a heatmap of Mexico City showing the levels of adoption by region (i.e. municipality). This requires, of course, cleaning up the data more thoroughly, and getting a shapefile of all the municipalities that comprise Mexico City. With that geospatial data, we could easily visualize other things too, such as user adoption faceted by gender, by "activity status" (as measured by the number of rides in a year), etc.
+
+Other possibilities for future analysis include merging other datasets (or their summaries) with this one to find even more interesting facts about the users of Ecobici. For instance, the website where we obtained the dataset used in this analysis, also makes available datasets regarding Ecobici stations and all rides taken since its launching in 2010. This could help us answer questions such as: what's the average time that people of different ages exercise using Ecobici? What are some of the most/least commonly used stations at certain times during the day? Where should we place the next Ecobici station so that it benefits active and devoted users the most?

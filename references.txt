@@ -1,0 +1,28 @@
+REFERENCES
+
+Ecobici Official Website
+https://www.ecobici.df.gob.mx/
+
+Ecobici - Telmex
+http://www.telmex.com/web/hogar/servicios-membresias-ecobici
+
+Data Processing with dplyr & tidyr
+https://rstudio-pubs-static.s3.amazonaws.com/58498_dd3b603ba4fb4b469bb1c57b5a951c39.html#group_by-function
+
+Introducing tidyr
+http://blog.rstudio.org/2014/07/22/introducing-tidyr/
+
+Colors in R
+http://www.stat.columbia.edu/~tzheng/files/Rcolor.pdf
+
+Dates and Times Made Easy with lubridate
+http://www.jstatsoft.org/v40/i03/paper
+
+Non-standard evaluation
+http://cran.r-project.org/web/packages/dplyr/vignettes/nse.html
+
+Options: Chunk options and package options | knitr
+http://yihui.name/knitr/options/
+
+Knitr with Markdown
+http://kbroman.org/knitr_knutshell/pages/Rmarkdown.html
